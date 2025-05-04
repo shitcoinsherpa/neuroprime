@@ -21,12 +21,6 @@ NeuroPrime combines nostalgia with cutting-edge AI capabilities, allowing you to
 - 📸 **Image upload support** for multimodal models
 - 🌐 **Works with any OpenRouter-supported model**
 
-## 🖥️ Screenshots
-
-<div align="center">
-  <img src="screenshots/neuroprime-interface.png" alt="NeuroPrime Interface" width="80%">
-</div>
-
 ## 🚀 Installation
 
 ### Prerequisites
