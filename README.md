@@ -146,7 +146,7 @@ To set up a development environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/neuroprime.git
+git clone https://github.com/shitcoinsherpa/neuroprime.git
 cd neuroprime
 
 # Create a virtual environment
