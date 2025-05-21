@@ -1,5 +1,22 @@
+# Core dependencies
 gradio==5.23.3
 requests==2.31.0
 pillow==10.2.0
 cryptography==41.0.7
 python-dotenv==1.0.0
+
+# Packaging and deployment
+pyinstaller==6.3.0
+pyppeteer==1.0.2
+safehttpx>=0.1.0
+
+# Web server dependencies
+uvicorn>=0.27.0
+fastapi>=0.109.0
+starlette>=0.36.0
+websockets<11.0,>=10.0  # Compatible with pyppeteer 1.0.2
+httpx>=0.26.0
+
+# macOS specific dependencies
+pyobjc-core>=10.0; sys_platform == 'darwin'
+pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'

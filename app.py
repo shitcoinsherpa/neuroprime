@@ -9,20 +9,28 @@ import io
 import uuid
 import threading
 import time
+import httpx
+import sys
+import platform
 import webbrowser
+import subprocess
+from pathlib import Path
+import logging
 
-# Constants
-# Store configuration files directly in the app directory for simplicity
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_DIR = os.path.join(APP_DIR, "config")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
-KEY_FILE = os.path.join(CONFIG_DIR, "key.bin")
+# --- MacOS App Support Directory ---
+def get_app_support_dir():
+    # Use ~/Library/Application Support/NeuroPrime for config/data
+    home = os.path.expanduser("~")
+    support_dir = os.path.join(home, "Library", "Application Support", "NeuroPrime")
+    os.makedirs(support_dir, exist_ok=True)
+    return support_dir
+
+APP_SUPPORT_DIR = get_app_support_dir()
+CONFIG_FILE = os.path.join(APP_SUPPORT_DIR, "config.json")
+KEY_FILE = os.path.join(APP_SUPPORT_DIR, "key.bin")
 DEFAULT_MODELS = ["openai/gpt-3.5-turbo", "anthropic/claude-3-haiku"]
 
-# Ensure config directory exists
-os.makedirs(CONFIG_DIR, exist_ok=True)
-
-# Generate or load encryption key
+# --- Encryption Key Management ---
 def get_encryption_key():
     if os.path.exists(KEY_FILE):
         with open(KEY_FILE, "rb") as f:
@@ -33,7 +41,6 @@ def get_encryption_key():
             f.write(key)
         return key
 
-# Encryption/decryption functions
 def encrypt_api_key(api_key):
     key = get_encryption_key()
     cipher = Fernet(key)
@@ -44,97 +51,74 @@ def decrypt_api_key(encrypted_api_key):
     cipher = Fernet(key)
     return cipher.decrypt(encrypted_api_key.encode()).decode()
 
-# Load config
+# --- Config Management ---
 def load_config():
     try:
         if os.path.exists(CONFIG_FILE):
-            print(f"Loading config from {CONFIG_FILE}")
             with open(CONFIG_FILE, "r") as f:
                 config = json.load(f)
                 if "api_key" in config and config["api_key"]:
                     try:
                         config["api_key"] = decrypt_api_key(config["api_key"])
-                    except Exception as e:
-                        print(f"Error decrypting API key: {e}")
+                    except Exception:
                         config["api_key"] = ""
                 if "models" not in config or not config["models"]:
                     config["models"] = DEFAULT_MODELS
-                print(f"Loaded config with {len(config.get('models', []))} models")
                 return config
-        else:
-            print(f"Config file not found at {CONFIG_FILE}, creating default config")
-    except Exception as e:
-        print(f"Error loading config: {e}")
-    
-    # Return default config if anything goes wrong
+    except Exception:
+        pass
     return {"api_key": "", "models": DEFAULT_MODELS, "conversations": []}
 
-# Save config
 def save_config(config):
-    # Make a deep copy to avoid modifying the original config
     config_to_save = config.copy()
     if "api_key" in config_to_save and config_to_save["api_key"]:
         config_to_save["api_key"] = encrypt_api_key(config_to_save["api_key"])
-    
-    # Ensure the directory exists
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    
-    # Write the config file
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_to_save, f)
-        
-    print(f"Config saved to {CONFIG_FILE}")
     return True
 
-# Initialize config
 config = load_config()
 
-# OpenRouter API functions
+# --- OpenRouter API Functions ---
 def get_reasoning_approach(query, api_key, model):
     if not api_key:
         return "API key is required.", None
-    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
     reasoning_prompt = f"""
     I have a question/task: "{query}"
-    
+
     From ALL POSSIBLE reasoning frameworks (including but not limited to: inductive, deductive, abductive, 
     critical thinking, systems thinking, lateral thinking, dialectical reasoning, analogical reasoning, 
     counterfactual reasoning, first principles reasoning, systems 1/2/3 thinking, bayesian reasoning, 
     causal reasoning, etc.), identify TWO complementary reasoning approaches that would work well IN TANDEM 
     to address this question/task effectively.
-    
+
     Explain briefly why these two specific frameworks combined would yield the best results for this particular 
     query. Be specific about how they complement each other.
-    
+
     FORMAT YOUR RESPONSE AS:
     1. Framework 1: [name] - [brief justification]
     2. Framework 2: [name] - [brief justification]
     3. Why combining them works: [explanation]
     4. Hybrid prompt prefix to add: [A paragraph that instructs how to use these two frameworks together]
     """
-    
     payload = {
         "model": model,
         "messages": [
             {"role": "user", "content": reasoning_prompt}
         ]
     }
-    
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", 
                                  headers=headers, json=payload)
         response.raise_for_status()
         response_data = response.json()
-        
         if "choices" in response_data and len(response_data["choices"]) > 0:
             result = response_data["choices"][0]["message"]["content"]
-            
-            # Extract the hybrid prompt prefix
             sections = result.split("Hybrid prompt prefix to add:")
             if len(sections) > 1:
                 hybrid_prompt = sections[1].strip()
@@ -149,27 +133,18 @@ def get_reasoning_approach(query, api_key, model):
 def send_message(messages, api_key, model, hybrid_prompt=None, image_data=None):
     if not api_key:
         return "API key is required."
-    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    
-    # Format messages for OpenRouter API
     formatted_messages = []
-    
     for msg in messages:
         if msg["role"] == "system":
             formatted_messages.append({"role": "system", "content": msg["content"]})
         else:
-            # For user and assistant messages
             content = msg["content"]
-            
-            # Add hybrid_prompt to the last user message if provided
             if hybrid_prompt and msg == messages[-1] and msg["role"] == "user":
                 content = f"{hybrid_prompt}\n\nUser query: {content}"
-            
-            # If this is the last user message and we have an image
             if image_data and msg == messages[-1] and msg["role"] == "user":
                 formatted_messages.append({
                     "role": msg["role"],
@@ -180,18 +155,15 @@ def send_message(messages, api_key, model, hybrid_prompt=None, image_data=None):
                 })
             else:
                 formatted_messages.append({"role": msg["role"], "content": content})
-    
     payload = {
         "model": model,
         "messages": formatted_messages
     }
-    
     try:
         response = requests.post("https://openrouter.ai/api/v1/chat/completions", 
                                  headers=headers, json=payload)
         response.raise_for_status()
         response_data = response.json()
-        
         if "choices" in response_data and len(response_data["choices"]) > 0:
             return response_data["choices"][0]["message"]["content"]
         else:
@@ -199,21 +171,15 @@ def send_message(messages, api_key, model, hybrid_prompt=None, image_data=None):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# Image encoding function
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-# UI Functions
+# --- UI Functions ---
 def save_api_key(api_key):
-    # Update the global config
     global config
     config["api_key"] = api_key
-    
-    # Save to file
     success = save_config(config)
-    
-    # Return a message
     return "API key saved successfully!" if api_key and success else "API key cleared."
 
 def add_model(model_name):
@@ -221,7 +187,6 @@ def add_model(model_name):
     if model_name and model_name not in config["models"]:
         config["models"].append(model_name)
         success = save_config(config)
-        print(f"Added model {model_name}, save success: {success}")
         return gr.Dropdown(choices=config["models"], value=model_name), f"Model {model_name} added!"
     elif model_name in config["models"]:
         return gr.Dropdown(choices=config["models"], value=model_name), f"Model {model_name} already exists."
@@ -233,7 +198,6 @@ def remove_model(model_name):
     if model_name in config["models"] and len(config["models"]) > 1:
         config["models"].remove(model_name)
         success = save_config(config)
-        print(f"Removed model {model_name}, save success: {success}")
         return gr.Dropdown(choices=config["models"], value=config["models"][0]), f"Model {model_name} removed!"
     elif len(config["models"]) <= 1:
         return gr.Dropdown(choices=config["models"]), "Cannot remove the last model."
@@ -247,8 +211,6 @@ def get_reasoning(query, api_key, model):
 def upload_image(image):
     if image is None:
         return None
-    
-    # Convert to base64
     img_byte_arr = io.BytesIO()
     image.save(img_byte_arr, format='JPEG')
     img_byte_arr = img_byte_arr.getvalue()
@@ -257,29 +219,17 @@ def upload_image(image):
 def on_submit(message, chat_history, api_key, model, hybrid_prompt, image_data):
     if not message:
         return "", chat_history
-    
-    # Add user message to history
     chat_history.append({"role": "user", "content": message})
-    
-    # Format messages for the API
     messages = [{"role": "system", "content": "You are a helpful assistant."}]
     messages.extend(chat_history)
-    
-    # Get response from the model
     response = send_message(messages, api_key, model, hybrid_prompt, image_data)
-    
-    # Add assistant response to history
     chat_history.append({"role": "assistant", "content": response})
-    
-    # Clear hybrid prompt after use
     return "", chat_history, None, None
 
 def format_chat_history(chat_history):
-    # With type="messages", we just return the chat history directly
-    # as it's already in the correct format with role/content keys
     return chat_history
 
-# Custom CSS for 90s hacker aesthetic
+# --- Custom CSS for 90s hacker aesthetic ---
 custom_css = """
 :root {
     --primary-color: #00ff00;
@@ -288,20 +238,17 @@ custom_css = """
     --text-color: #00ff00;
     --font-family: 'Courier New', monospace;
 }
-
 body {
     background-color: var(--background-color);
     color: var(--text-color);
     font-family: var(--font-family);
     text-shadow: 0 0 5px var(--primary-color);
 }
-
 .gradio-container {
     background-color: rgba(0,0,0,0.8);
     border: 2px solid var(--primary-color);
     box-shadow: 0 0 15px var(--primary-color);
 }
-
 .app-header {
     text-align: center;
     text-transform: uppercase;
@@ -309,35 +256,29 @@ body {
     animation: pulse 1.5s infinite;
     margin-bottom: 20px;
 }
-
 @keyframes pulse {
     0% { text-shadow: 0 0 5px var(--primary-color); }
     50% { text-shadow: 0 0 20px var(--primary-color), 0 0 30px var(--primary-color); }
     100% { text-shadow: 0 0 5px var(--primary-color); }
 }
-
 .message-bubble {
     background-color: #001100;
     border: 1px solid var(--primary-color);
     border-radius: 0;
     font-family: var(--font-family);
 }
-
 .user-message {
     background-color: #001400;
 }
-
 .assistant-message {
     background-color: #000800;
 }
-
 .input-box {
     border: 1px solid var(--primary-color) !important;
     background-color: #001000 !important;
     color: var(--text-color) !important;
     font-family: var(--font-family) !important;
 }
-
 button {
     background-color: var(--background-color) !important;
     color: var(--primary-color) !important;
@@ -346,26 +287,22 @@ button {
     letter-spacing: 1px;
     transition: all 0.3s;
 }
-
 button:hover {
     background-color: var(--primary-color) !important;
     color: var(--background-color) !important;
     box-shadow: 0 0 10px var(--primary-color);
 }
-
 .settings-panel {
     border: 1px dashed var(--primary-color);
     padding: 10px;
     margin-top: 10px;
 }
-
 .footer {
     text-align: center;
     font-size: 0.8em;
     margin-top: 20px;
     color: #006600;
 }
-
 /* Scanlines effect */
 .scanlines {
     position: fixed;
@@ -383,12 +320,10 @@ button:hover {
     pointer-events: none;
     opacity: 0.3;
 }
-
 /* CRT flicker */
 .crt-flicker {
     animation: flicker 0.15s infinite;
 }
-
 @keyframes flicker {
     0% { opacity: 0.98; }
     25% { opacity: 1; }
@@ -396,12 +331,10 @@ button:hover {
     75% { opacity: 0.98; }
     100% { opacity: 1; }
 }
-
 /* Glitch effect for title */
 .glitch {
     position: relative;
 }
-
 .glitch::before,
 .glitch::after {
     content: attr(data-text);
@@ -411,19 +344,16 @@ button:hover {
     width: 100%;
     height: 100%;
 }
-
 .glitch::before {
     animation: glitch-effect 3s infinite;
     clip-path: polygon(0 0, 100% 0, 100% 35%, 0 35%);
     text-shadow: -2px 0 #ff00ff;
 }
-
 .glitch::after {
     animation: glitch-effect 2s infinite reverse;
     clip-path: polygon(0 65%, 100% 65%, 100% 100%, 0 100%);
     text-shadow: 2px 0 #00ffff;
 }
-
 @keyframes glitch-effect {
     0% { transform: translate(0); }
     20% { transform: translate(-3px, 3px); }
@@ -434,14 +364,12 @@ button:hover {
 }
 """
 
-# Main UI
+# --- Main UI ---
 with gr.Blocks(css=custom_css) as demo:
-    # Hidden state variables
     current_hybrid_prompt = gr.State(None)
     current_image_data = gr.State(None)
     chat_state = gr.State([])
-    
-    # Add scanlines and CRT effect divs
+
     gr.HTML("""
     <div class="scanlines"></div>
     <div class="crt-flicker"></div>
@@ -450,7 +378,7 @@ with gr.Blocks(css=custom_css) as demo:
         <p>Advanced Neural Reasoning Framework</p>
     </div>
     """)
-    
+
     with gr.Row():
         with gr.Column(scale=3):
             chatbot = gr.Chatbot(
@@ -461,7 +389,6 @@ with gr.Blocks(css=custom_css) as demo:
                 container=True,
                 type="messages"
             )
-            
             with gr.Row():
                 with gr.Column(scale=8):
                     msg = gr.Textbox(
@@ -470,17 +397,14 @@ with gr.Blocks(css=custom_css) as demo:
                         container=False,
                         elem_classes=["input-box"]
                     )
-                    
                     image_upload = gr.Image(
                         type="pil", 
                         label="Upload Image (if model supports it)",
                         visible=True
                     )
-                
                 with gr.Column(scale=2):
                     get_reasoning_btn = gr.Button("GET R34S0NING", variant="primary")
                     submit_btn = gr.Button("S3ND M3SS4G3", variant="primary")
-        
         with gr.Column(scale=1):
             with gr.Group():
                 api_key = gr.Textbox(
@@ -490,65 +414,50 @@ with gr.Blocks(css=custom_css) as demo:
                     label="OpenRouter API Key"
                 )
                 save_key_btn = gr.Button("S4V3 K3Y")
-                
                 model_dropdown = gr.Dropdown(
                     choices=config.get("models", DEFAULT_MODELS),
                     value=config.get("models", DEFAULT_MODELS)[0] if config.get("models", DEFAULT_MODELS) else None,
                     label="Select Model"
                 )
-                
                 with gr.Row():
                     new_model = gr.Textbox(placeholder="Model name (e.g., openai/gpt-4)", label="Add New Model")
                     add_model_btn = gr.Button("ADD", scale=1)
-                
                 with gr.Row():
                     remove_model_btn = gr.Button("R3M0V3 M0D3L")
-            
             reasoning_output = gr.Textbox(
                 label="Reasoning Framework",
                 placeholder="Click 'GET REASONING' to see the AI's approach...",
                 lines=10,
                 max_lines=10
             )
-    
     gr.HTML("""
     <div class="footer">
         <p>©2025 NeuroPrime | SYST3M STAT5: FULL P0W3R | Initializing Neural Pathways...</p>
     </div>
     """)
-    
-    # Set up event handlers
+
     def update_chat_display(chat_history):
         formatted = format_chat_history(chat_history)
         return formatted
 
-    # Function to process image
     def process_image(image):
         if image is None:
             return None
         return upload_image(image)
-    
-    # Event bindings
+
     save_key_btn.click(save_api_key, inputs=[api_key], outputs=[gr.Textbox()])
-    
     add_model_btn.click(add_model, inputs=[new_model], outputs=[model_dropdown, gr.Textbox()])
-    
     remove_model_btn.click(remove_model, inputs=[model_dropdown], outputs=[model_dropdown, gr.Textbox()])
-    
     get_reasoning_btn.click(
         get_reasoning, 
         inputs=[msg, api_key, model_dropdown], 
         outputs=[reasoning_output, current_hybrid_prompt]
     )
-    
-    # Update image data when image is uploaded
     image_upload.change(
         process_image,
         inputs=[image_upload],
         outputs=[current_image_data]
     )
-    
-    # Handle message submission
     submit_event = submit_btn.click(
         on_submit,
         inputs=[msg, chat_state, api_key, model_dropdown, current_hybrid_prompt, current_image_data],
@@ -558,7 +467,6 @@ with gr.Blocks(css=custom_css) as demo:
         inputs=[chat_state],
         outputs=[chatbot]
     )
-    
     msg.submit(
         on_submit,
         inputs=[msg, chat_state, api_key, model_dropdown, current_hybrid_prompt, current_image_data],
@@ -569,5 +477,113 @@ with gr.Blocks(css=custom_css) as demo:
         outputs=[chatbot]
     )
 
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("NeuroPrime")
+
+# --- MacOS App Management ---
+def is_running_as_bundled_app():
+    """Check if the application is running as a bundled macOS app."""
+    bundle_path = os.environ.get('NEUROPRIME_BUNDLE_PATH')
+    if bundle_path:
+        logger.info(f"Running as bundled app with path: {bundle_path}")
+        return True
+    
+    # Check common bundle path indicators
+    app_path = os.path.abspath(sys.argv[0])
+    is_bundled = '.app/Contents/Resources' in app_path or '.app/Contents/MacOS' in app_path
+    
+    if is_bundled:
+        logger.info(f"Detected bundled app from path: {app_path}")
+    else:
+        logger.info("Running in development mode")
+    
+    return is_bundled
+
+def show_splash_screen():
+    """Display a splash screen while the app is loading (macOS only)."""
+    if not is_running_as_bundled_app() or platform.system() != 'Darwin':
+        return
+
+    try:
+        # Use a simple AppleScript to display a splash window
+        import subprocess
+        
+        # Get bundle path for icon
+        bundle_path = os.environ.get('NEUROPRIME_BUNDLE_PATH', '')
+        icon_path = os.path.join(bundle_path, 'Resources', 'neuroprime.icns')
+        icon_path_osa = icon_path.replace('"', '\\"') # escape quotes
+        
+        # Create AppleScript for splash window
+        applescript = f'''
+        tell application "System Events"
+            set frontmost of every process whose unix id is {os.getpid()} to true
+        end tell
+        
+        tell application "System Events"
+            set iconPath to POSIX file "{icon_path_osa}" as alias
+            display dialog "NeuroPrime is starting..." ¬
+                with title "NeuroPrime" with icon iconPath buttons {{"Loading..."}} ¬
+                default button 1 giving up after 3
+        end tell
+        '''
+        
+        # Execute the AppleScript
+        subprocess.Popen(['osascript', '-e', applescript])
+        logger.info("Splash screen displayed")
+    except Exception as e:
+        logger.error(f"Error showing splash screen: {e}")
+
+# --- Default Browser Launcher ---
+def open_in_default_browser(url: str):
+    if platform.system() == "Darwin":               # macOS
+        subprocess.Popen(["open", url])            # respects user’s default browser
+    elif platform.system() == "Windows":
+        os.startfile(url)                          # type: ignore  # default handler
+    else:                                          # Linux / BSD
+        webbrowser.open(url)
+
 if __name__ == "__main__":
-    demo.launch(share=False)
+    try:
+        # Determine if running as a bundled app
+        bundled_app = is_running_as_bundled_app()
+        
+        if bundled_app:
+            # Show splash screen when running as bundled app
+            show_splash_screen()
+            
+            # When running as a bundled app, use the embedded browser approach
+            # Launch Gradio server without opening a browser
+            logger.info("Starting Gradio server in bundled app mode")
+            launch_result = demo.launch(
+                prevent_thread_lock=False,
+                share=False,
+                show_error=True,
+                quiet=False,
+                inline=False,
+                inbrowser=True,
+                favicon_path=None,
+                ssl_verify=False
+            )
+            
+        else:
+            # Standard development mode - let Gradio handle browser launch
+            logger.info("Starting Gradio server in development mode")
+            demo.launch(share=False)
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        # If we're in a bundled app, display an error dialog
+        if is_running_as_bundled_app() and platform.system() == 'Darwin':
+            try:
+                import subprocess
+                error_msg = str(e).replace('"', '\\"')
+                subprocess.call(['osascript', '-e', f'display dialog "Error starting NeuroPrime: {error_msg}" with title "NeuroPrime Error" buttons {{"OK"}} default button 1 with icon stop'])
+            except:
+                pass
+        sys.exit(1)
